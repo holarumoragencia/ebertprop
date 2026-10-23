@@ -1,0 +1,171 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>html,body{margin:0;background:#fff;overflow:hidden}canvas{display:block}</style>
+</head><body>
+<canvas id="c"></canvas>
+<div id="svghost" style="position:absolute;left:-9999px;top:0;width:400px;height:460px"></div>
+<script>
+// Motion de logo Ebert Prop. window.render(t) dibuja el instante t (segundos).
+const GREEN=[4,80,52], GREEN_CSS='#045034', TOTAL=9.5;
+window.TOTAL=TOTAL;
+const W=innerWidth, H=innerHeight, VB=[379.58,449.36];
+const cv=document.getElementById('c'); cv.width=W; cv.height=H; const ctx=cv.getContext('2d');
+
+const clamp=(x,a=0,b=1)=>Math.min(b,Math.max(a,x));
+const prog=(t,a,d)=>clamp((t-a)/d);
+const outCubic=x=>1-Math.pow(1-x,3), outQuint=x=>1-Math.pow(1-x,5);
+const inOutCubic=x=>x<.5?4*x*x*x:1-Math.pow(-2*x+2,3)/2;
+const inOutSine=x=>-(Math.cos(Math.PI*x)-1)/2;
+const outBack=(x,s=1.4)=>1+(s+1)*Math.pow(x-1,3)+s*Math.pow(x-1,2);
+const lerp=(a,b,x)=>a+(b-a)*x;
+
+// Escala base del logo y lienzo intermedio (a la escala máxima de la cámara).
+const FIT=Math.min(W*0.62/VB[0], H*0.62/VB[1]), CAM0=1.06, K=FIT*CAM0;
+const LW=Math.ceil(VB[0]*K), LH=Math.ceil(VB[1]*K);
+const lc=document.createElement('canvas'); lc.width=LW; lc.height=LH; const lx=lc.getContext('2d');
+const tc=document.createElement('canvas'); tc.width=LW; tc.height=LH; const tx=tc.getContext('2d');
+
+let S; // formas del logo
+function toPath(el){
+  const n=el.tagName;
+  if(n==='path') return el.getAttribute('d');
+  if(n==='rect'){const x=+el.getAttribute('x'),y=+el.getAttribute('y'),w=+el.getAttribute('width'),h=+el.getAttribute('height');return `M${x},${y}h${w}v${h}h${-w}Z`;}
+  if(n==='polygon') return 'M'+el.getAttribute('points').trim().split(/\s+/).reduce((a,v,i,arr)=>i%2?a:a.concat(arr[i]+','+arr[i+1]),[]).join('L')+'Z';
+  if(n==='circle'){const cx=+el.getAttribute('cx'),cy=+el.getAttribute('cy'),r=+el.getAttribute('r');return `M${cx-r},${cy}a${r},${r} 0 1,0 ${2*r},0a${r},${r} 0 1,0 ${-2*r},0Z`;}
+}
+function polyPts(el){
+  if(el.tagName==='rect'){const x=+el.getAttribute('x'),y=+el.getAttribute('y'),w=+el.getAttribute('width'),h=+el.getAttribute('height');return [[x,y],[x+w,y],[x+w,y+h],[x,y+h]];}
+  const v=el.getAttribute('points').trim().split(/\s+/).map(Number),p=[];for(let i=0;i<v.length;i+=2)p.push([v[i],v[i+1]]);return p;
+}
+
+window.ready=(async()=>{
+  const txt=await (await fetch('logo.svg')).text();
+  const host=document.getElementById('svghost'); host.innerHTML=txt;
+  const svg=host.querySelector('svg'); svg.setAttribute('width',VB[0]); svg.setAttribute('height',VB[1]);
+  const els=[...svg.querySelectorAll('path,rect,polygon,circle')];
+  const item=el=>{const b=el.getBBox();return {p:new Path2D(toPath(el)),b:{x:b.x,y:b.y,w:b.width,h:b.height,cx:b.x+b.width/2,cy:b.y+b.height/2},el};};
+  const all=els.map(item);
+  S={tag:all.slice(0,21), ebert:all.slice(21,26), prop:all.slice(26,30), dot:all[30],
+     leaves:all.slice(31,36), wins:all.slice(36,40).map(o=>({...o,pts:polyPts(o.el)})), trunk:all[40]};
+
+  // Tronco rasterizado + distancia geodésica desde la punta de las dos raíces:
+  // el árbol "crece" recorriendo su propia forma.
+  tx.setTransform(K,0,0,K,0,0); tx.fillStyle='#000'; tx.fill(S.trunk.p);
+  const A=tx.getImageData(0,0,LW,LH).data, N=LW*LH, alpha=new Uint8Array(N);
+  for(let i=0;i<N;i++) alpha[i]=A[i*4+3];
+  let seeds=[-1,-1], best=[-1,-1];
+  for(let y=0;y<LH;y++)for(let x=0;x<LW;x++){const i=y*LW+x;if(alpha[i]>128){const s=x<LW/2?0:1;if(y>best[s]){best[s]=y;seeds[s]=i;}}}
+  const D=new Float32Array(N).fill(Infinity), buckets=[];
+  const push=(i,d)=>{(buckets[d]||(buckets[d]=[])).push(i)};
+  seeds.forEach(i=>{D[i]=0;push(i,0)});
+  const nb=[[1,0,3],[-1,0,3],[0,1,3],[0,-1,3],[1,1,4],[1,-1,4],[-1,1,4],[-1,-1,4]];
+  for(let d=0;d<buckets.length;d++){const B=buckets[d];if(!B)continue;
+    for(const i of B){if(D[i]<d)continue;const x=i%LW,y=(i/LW)|0;
+      for(const [dx,dy,w] of nb){const X=x+dx,Y=y+dy;if(X<0||Y<0||X>=LW||Y>=LH)continue;const j=Y*LW+X;
+        if(!alpha[j])continue;const nd=d+w;if(nd<D[j]){D[j]=nd;push(j,nd);}}}}
+  let maxD=0;const idx=[];
+  for(let i=0;i<N;i++)if(alpha[i]){D[i]/=3;if(D[i]>maxD)maxD=D[i];idx.push(i);}
+  S.D=D;S.alpha=alpha;S.idx=Uint32Array.from(idx);S.maxD=maxD;
+  S.img=tx.createImageData(LW,LH);
+
+  // Cada hoja brota cuando el crecimiento llega a la rama más cercana.
+  S.leaves.forEach((L,k)=>{
+    const cx=L.b.cx*K, cy=L.b.cy*K;let bd=Infinity,bi=0;
+    for(const i of S.idx){const x=i%LW,y=(i/LW)|0,d=(x-cx)**2+(y-cy)**2;if(d<bd){bd=d;bi=i;}}
+    const px=(bi%LW)/K, py=((bi/LW)|0)/K;
+    L.pivot=[clamp(px,L.b.x,L.b.x+L.b.w),clamp(py,L.b.y,L.b.y+L.b.h)];
+    L.reach=D[bi]/maxD; L.side=Math.sign(L.b.cx-VB[0]/2);
+  });
+})();
+
+// ---------- línea de tiempo ----------
+const T_GROW=[0.35,2.9];
+const growFront=t=>inOutSine(prog(t,T_GROW[0],T_GROW[1]))*1.06;
+function reachTime(r){let a=T_GROW[0],b=T_GROW[0]+T_GROW[1];for(let k=0;k<30;k++){const m=(a+b)/2;if(growFront(m)<r)a=m;else b=m;}return a;}
+
+function drawTrunk(t){
+  const f=growFront(t)*S.maxD, soft=14*K/2.2, d=S.img.data, D=S.D, al=S.alpha;
+  d.fill(0);
+  for(const i of S.idx){const m=clamp((f-D[i])/soft);if(m<=0)continue;
+    const o=i*4;d[o]=GREEN[0];d[o+1]=GREEN[1];d[o+2]=GREEN[2];d[o+3]=al[i]*m*m*(3-2*m);}
+  tx.setTransform(1,0,0,1,0,0);tx.putImageData(S.img,0,0);
+  lx.setTransform(1,0,0,1,0,0);lx.drawImage(tc,0,0);
+}
+
+function drawLeaves(t){
+  S.leaves.forEach(L=>{
+    const t0=reachTime(L.reach)+0.05, p=prog(t,t0,1.15);if(p<=0)return;
+    const s=outBack(outCubic(p)*0.999+0.001,1.15), r=(1-outCubic(p))*-0.55*L.side;
+    lx.save();lx.setTransform(K,0,0,K,0,0);
+    lx.translate(...L.pivot);lx.rotate(r);lx.scale(s,s);lx.translate(-L.pivot[0],-L.pivot[1]);
+    lx.globalAlpha=clamp(p*5);lx.fillStyle=GREEN_CSS;lx.fill(L.p);lx.restore();
+  });
+}
+
+// Ventanas: postigos abiertos hacia el frente que giran sobre su bisagra y se cierran.
+function drawWindows(t){
+  const hingeL=S.wins[0].b.x, hingeR=S.wins[2].b.x+S.wins[2].b.w, P=260;
+  // luz cálida de hogar detrás de los postigos, que se apaga al cerrarse
+  const gp=prog(t,3.0,0.5)*(1-inOutCubic(prog(t,3.6,1.1)));
+  if(gp>0){const cx=(hingeL+hingeR)/2, cy=(S.wins[0].b.y+S.wins[1].b.y+S.wins[1].b.h)/2;
+    lx.save();lx.setTransform(K,0,0,K,0,0);const g=lx.createRadialGradient(cx,cy,0,cx,cy,34);
+    g.addColorStop(0,`rgba(226,196,128,${0.55*gp})`);g.addColorStop(1,'rgba(226,196,128,0)');
+    lx.fillStyle=g;lx.fillRect(cx-40,cy-40,80,80);lx.restore();}
+  S.wins.forEach((w,k)=>{
+    const left=k<2, t0=3.15+(k%2)*0.22+(left?0:0.08), p=prog(t,t0,1.25);if(p<=0)return;
+    const e=inOutCubic(p), settle=Math.sin(prog(t,t0+1.25,0.4)*Math.PI)*0.06;
+    const a=lerp(1.32,0,e)+settle;
+    const hx=left?hingeL:hingeR, cy=w.b.cy;
+    const pts=w.pts.map(([x,y])=>{const dx=x-hx, z=Math.abs(dx)*Math.sin(a), k2=P/(P-z);
+      return [hx+dx*Math.cos(a)*k2, cy+(y-cy)*k2];});
+    const light=Math.sin(a)*0.55;
+    lx.save();lx.setTransform(K,0,0,K,0,0);lx.globalAlpha=clamp(p*4);
+    lx.fillStyle=`rgb(${Math.round(lerp(GREEN[0],70,light))},${Math.round(lerp(GREEN[1],140,light))},${Math.round(lerp(GREEN[2],105,light))})`;
+    lx.beginPath();pts.forEach(([x,y],i)=>i?lx.lineTo(x,y):lx.moveTo(x,y));lx.closePath();lx.fill();lx.restore();
+  });
+}
+
+function drawWordmark(t){
+  // el punto central aparece primero; las letras surgen desde la línea base, del centro hacia afuera
+  const dp=prog(t,4.15,0.7);
+  if(dp>0){const d=S.dot,s=outBack(dp,1.6);lx.save();lx.setTransform(K,0,0,K,0,0);
+    lx.translate(d.b.cx,d.b.cy);lx.scale(s,s);lx.translate(-d.b.cx,-d.b.cy);lx.fillStyle=GREEN_CSS;lx.fill(d.p);lx.restore();}
+  const letters=[...S.ebert.slice().reverse().map((l,i)=>[l,i]),...S.prop.map((l,i)=>[l,i])];
+  for(const [l,i] of letters){
+    const p=prog(t,4.35+i*0.085,1.05);if(p<=0)continue;const e=outQuint(p);
+    lx.save();lx.setTransform(K,0,0,K,0,0);
+    lx.beginPath();lx.rect(l.b.x-3,l.b.y-20,l.b.w+6,l.b.h+20.5);lx.clip();
+    lx.translate(0,(1-e)*l.b.h*1.05);lx.fillStyle=GREEN_CSS;lx.fill(l.p);lx.restore();
+  }
+}
+
+function drawTagline(t){
+  const cx=VB[0]/2, n=S.tag.length;
+  S.tag.forEach((l,i)=>{
+    const p=prog(t,5.35+i*0.035,1.0);if(p<=0)return;const e=outCubic(p);
+    const track=lerp(1.07,1,outCubic(prog(t,5.35,1.9)));
+    lx.save();lx.setTransform(K,0,0,K,0,0);lx.globalAlpha=e;
+    lx.translate((l.b.cx-cx)*(track-1),(1-e)*5);lx.fillStyle=GREEN_CSS;lx.fill(l.p);lx.restore();
+  });
+}
+
+// Reflejo de luz diagonal sobre todo el logo.
+function drawSheen(t){
+  const p=prog(t,6.75,1.35);if(p<=0||p>=1)return;
+  const x=lerp(-0.45,1.45,inOutSine(p))*LW, w=LW*0.22;
+  lx.save();lx.setTransform(1,0,0,1,0,0);lx.globalCompositeOperation='source-atop';
+  const g=lx.createLinearGradient(x-w,-w*0.4,x+w,w*0.4);
+  g.addColorStop(0,'rgba(255,255,255,0)');g.addColorStop(0.5,'rgba(214,240,226,0.55)');g.addColorStop(1,'rgba(255,255,255,0)');
+  lx.fillStyle=g;lx.fillRect(0,0,LW,LH);lx.restore();
+}
+
+window.render=t=>{
+  lx.setTransform(1,0,0,1,0,0);lx.clearRect(0,0,LW,LH);
+  drawTrunk(t);drawLeaves(t);drawWindows(t);drawWordmark(t);drawTagline(t);drawSheen(t);
+
+  ctx.setTransform(1,0,0,1,0,0);ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);
+  const cam=lerp(CAM0,1,outCubic(prog(t,0,8.2)))/CAM0;
+  ctx.imageSmoothingQuality='high';
+  ctx.translate(W/2,H/2);ctx.scale(cam,cam);ctx.drawImage(lc,-LW/2,-LH/2);
+};
+</script></body></html>
